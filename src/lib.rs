@@ -1,14 +1,36 @@
-use core::fmt::Write;
+#![warn(
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::missing_inline_in_public_items
+)]
+
 use std::{
     fmt::Display,
+    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const STR_LEN: usize = 13;
 const RND_BITS: usize = 36;
 const RND_MASK: u64 = (1 << RND_BITS) - 1;
+/// Seconds since Unix epoch for 2020-01-01T00:00:00Z.
+const SECOND_EPOCH_MS: u64 = 1_577_836_800_000;
 
-static CHARS: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
+const CHARS: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
+
+const NORMAL_MAPPING: [i8; 256] = [
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1, -1, -1, -1, -1, -1, 10, 11, 12, 13, 14, 15, 16, 17, 1,
+    18, 19, 1, 20, 21, 0, 22, 23, 24, 25, 26, -2, 27, 28, 29, 30, 31, -1, -1, -1, -1, -1, -1, 10,
+    11, 12, 13, 14, 15, 16, 17, 1, 18, 19, 1, 20, 21, 0, 22, 23, 24, 25, 26, -2, 27, 28, 29, 30,
+    31, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+];
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -16,149 +38,188 @@ pub enum Error {
     Encode(u64, std::fmt::Error),
     #[error("IdStr full: tried to write {byte} @ {idx}")]
     IdStrFull { byte: u8, idx: usize },
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct IdStr {
-    data: [u8; STR_LEN],
-    idx: usize,
-}
-
-impl IdStr {
-    pub fn new(x: u64) -> Self {
-        let mut idstr = Self::default();
-        encode(x, &mut idstr)
-            .map_err(|e| Error::Encode(x, e))
-            .map_err(|e| {
-                eprintln!("ERROR: {}", e);
-                e
-            })
-            .unwrap();
-        idstr
-    }
-
-    pub fn write_char(&mut self, c: impl Into<u8>) -> Result<(), Error> {
-        let byte = c.into();
-        if self.idx >= STR_LEN {
-            return Err(Error::IdStrFull {
-                byte,
-                idx: self.idx,
-            });
-        }
-        self.data[self.idx] = byte;
-        self.idx += 1;
-        Ok(())
-    }
-}
-
-impl Write for IdStr {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        for c in s.as_bytes() {
-            self.write_char(*c).unwrap();
-        }
-        Ok(())
-    }
+    #[error("decoding error: invalid digit: {0}")]
+    InvalidDigit(u8),
+    #[error("decoding error: string must be exactly 13 characters, got {0}")]
+    InvalidStrLen(usize),
 }
 
 /// Id is a STR_LEN-char representation of a 64-bit number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Id([u8; STR_LEN]);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Id(u64);
 
 impl Id {
+    /// Creates a new [`Id`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if now is somehow earlier than the unix epoch.
+    #[must_use]
+    #[inline]
     pub fn new() -> Self {
+        #[allow(clippy::cast_possible_truncation)]
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_millis() as u64;
+            .as_millis() as u64
+            - SECOND_EPOCH_MS;
         let rnd = fastrand::u64(..);
         let x = (time << RND_BITS) | (rnd & RND_MASK);
-        let idstr = IdStr::new(x);
-        Self(idstr.data)
+        Self(x)
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn from_u64(x: u64) -> Self {
+        Self(x)
     }
 }
 
 impl Default for Id {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
+impl FromStr for Id {
+    type Err = Error;
+
+    #[inline]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(decode(s.as_bytes())?))
+    }
+}
+
 impl Display for Id {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for c in self.0 {
-            f.write_char(c as char)?;
-        }
-        Ok(())
+        let arr = encode_array(self.0);
+        let s = unsafe { std::str::from_utf8_unchecked(&arr[..]) };
+        f.write_str(s)
     }
 }
 
 impl From<u64> for Id {
+    #[inline]
     fn from(x: u64) -> Self {
-        let idstr = IdStr::new(x);
-        Self(idstr.data)
+        Self(x)
     }
 }
 
-impl From<&str> for Id {
-    fn from(x: &str) -> Self {
-        let mut inner = [0u8; STR_LEN];
-        for (i, c) in x.as_bytes().iter().enumerate() {
-            inner[i] = *c;
-        }
-        Self(inner)
+const START_PLACE: u64 = 0x20u64.pow(12);
+
+const fn decode(input: &[u8]) -> Result<u64, Error> {
+    let mut input = input;
+    if input.len() != 13 {
+        return Err(Error::InvalidStrLen(input.len()));
     }
+    let mut place = START_PLACE;
+    let mut n = 0;
+    while let [byte, rest @ ..] = input {
+        let digit = match normalize(*byte) {
+            Ok(digit) => digit,
+            err @ Err(_) => return err,
+        };
+        n += digit.wrapping_mul(place);
+        place >>= 5;
+        input = rest;
+    }
+    Ok(n)
 }
 
-// This is taken from the crockford crate but modified to _not_ strip leading
-// zeroes and to use a lowercase char set.
-pub fn encode<T: Write>(mut n: u64, buf: &mut T) -> Result<(), std::fmt::Error> {
-    // Used for the initial shift.
-    const QUAD_SHIFT: usize = 60;
+const fn normalize(byte: u8) -> Result<u64, Error> {
+    let mapped = NORMAL_MAPPING[byte as usize];
+    if mapped == -1 || mapped == -2 {
+        return Err(Error::InvalidDigit(byte));
+    }
+    #[allow(clippy::cast_sign_loss)]
+    Ok(mapped as u64)
+}
 
-    // Used for all subsequent shifts.
-    const FIVE_SHIFT: usize = 59;
-    const FIVE_RESET: usize = 5;
-
-    // After we clear the four most significant bits, the four least significant bits will be
-    // replaced with 0001. We can then know to stop once the four most significant bits are,
-    // likewise, 0001.
-    const STOP_BIT: u64 = 1 << QUAD_SHIFT;
+const fn encode_array(n: u64) -> [u8; STR_LEN] {
+    let mut n = n;
+    let mut buf = [0u8; STR_LEN];
 
     if n == 0 {
-        buf.write_char('0')?;
-        return Ok(());
+        return buf;
     }
 
     let mut idx = 0;
 
-    // From now until we reach the stop bit, take the five most significant bits and then shift
-    // left by five bits.
-    while n != STOP_BIT && idx < STR_LEN {
-        buf.write_char(CHARS[(n >> FIVE_SHIFT) as usize] as char)?;
-        match idx {
-            5 => {
-                idx += 2;
-                buf.write_char('.')?;
-            }
-            _ => idx += 1,
-        };
-        n <<= FIVE_RESET;
+    buf[idx] = CHARS[(n >> 60) as usize];
+    idx += 1;
+    n <<= 4;
+
+    while idx < STR_LEN {
+        buf[idx] = CHARS[(n >> 59) as usize];
+        idx += 1;
+        n <<= 5;
     }
 
-    Ok(())
+    buf
 }
 
 pub trait Identifiable {
     fn id(&self) -> Id;
 }
 
+// Compile-time tests.
+#[allow(non_upper_case_globals)]
+const _: () = {
+    use konst::{const_eq_for, result};
+    // encoding
+    assert!(const_eq_for!(slice; encode_array(0b1111 << 60), *b"f000000000000"));
+    assert!(const_eq_for!(slice; encode_array(0b1111), *b"000000000000f"));
+    assert!(const_eq_for!(slice; encode_array(0xFFFF_FFFF_FFFF_FFFF), *b"fzzzzzzzzzzzz"));
+    // decoding
+    assert!(result::unwrap_or!(decode(b"f000000000000"), 0) == 0b1111 << 60);
+    assert!(result::unwrap_or!(decode(b"000000000000f"), 0) == 0b1111);
+    assert!(result::unwrap_or!(decode(b"fzzzzzzzzzzzz"), 0) == 0xFFFF_FFFF_FFFF_FFFF);
+};
+
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
+    fn test_to_string() {
+        let id = Id(0b1111 << 60);
+        let s = id.to_string();
+        let mut expected = [CHARS[0]; 13];
+        expected[0] = CHARS[15];
+        assert_eq!(s, std::str::from_utf8(&expected).unwrap());
+
+        let id = Id(0b1111);
+        let s = id.to_string();
+        let mut expected = [CHARS[0]; 13];
+        expected[12] = CHARS[15];
+        assert_eq!(s, std::str::from_utf8(&expected).unwrap());
+    }
+
+    #[test]
+    fn test_from_str() {
+        let id = Id::from_str("f000000000000").unwrap();
+        assert_eq!(id.0, 0b01111 << 60);
+        let id = Id::from_str("f00000000000f").unwrap();
+        assert_eq!(id.0, 0b01111 << 60 | 0b01111);
+        let id = Id::from_str("000000000000f").unwrap();
+        assert_eq!(id.0, 0b01111);
+        let id = Id::from_str("fzzzzzzzzzzzz").unwrap();
+        assert_eq!(id.0, 0xFFFF_FFFF_FFFF_FFFF);
+    }
+
+    #[test]
     fn is_ok() {
-        let id = Id::from(0xdeadbeefbeefdead);
-        assert_eq!("vtpvxv.xyxzfa", id.to_string());
+        let id = Id::from(0xdead_beef_beef_dead);
+        assert_eq!("dxbdyxyzezqnd", id.to_string());
+
+        let id = Id::from_str("dxbdyxyzezqnd").unwrap();
+        assert_eq!(id.0, 0xdead_beef_beef_dead);
+
+        let id = Id::new();
+        let s = id.to_string();
+        assert_eq!(s, Id::from_str(&s).unwrap().to_string());
+        assert_eq!(id, Id::from_str(&s).unwrap());
     }
 }
