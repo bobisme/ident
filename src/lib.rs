@@ -223,3 +223,12 @@ mod test {
         assert_eq!(id, Id::from_str(&s).unwrap());
     }
 }
+
+#[cfg(kani)]
+#[kani::proof]
+fn check_encoding() {
+    use kani;
+    let x: u64 = kani::any();
+    let arr = encode_array(x);
+    assert!(decode(&arr).unwrap() == x);
+}
