@@ -27,19 +27,15 @@ const TIME_SHIFT: usize = 5;
 const CHARS_STR: &str = "0123456789abcdefghjkmnpqrstvwxyz";
 const CHARS: &[u8] = CHARS_STR.as_bytes();
 
-const NORMAL_MAPPING: [i8; 256] = [
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1, -1, -1, -1, -1, -1, 10, 11, 12, 13, 14, 15, 16, 17, 1,
-    18, 19, 1, 20, 21, 0, 22, 23, 24, 25, 26, -2, 27, 28, 29, 30, 31, -1, -1, -1, -1, -1, -1, 10,
-    11, 12, 13, 14, 15, 16, 17, 1, 18, 19, 1, 20, 21, 0, 22, 23, 24, 25, 26, -2, 27, 28, 29, 30,
-    31, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-];
+const DECODE_MAP: [i8; 256] = {
+    let mut arr = [-1i8; 256];
+    let mut i = 0;
+    while i < CHARS.len() {
+        arr[CHARS[i] as usize] = i as i8;
+        i += 1;
+    }
+    arr
+};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -135,7 +131,7 @@ const fn decode(input: &[u8]) -> Result<u128, Error> {
         if *byte == b'-' {
             continue;
         }
-        let digit = match normalize(*byte) {
+        let digit = match map_byte(*byte) {
             Ok(digit) => digit,
             Err(e) => return Err(e),
         };
@@ -145,8 +141,8 @@ const fn decode(input: &[u8]) -> Result<u128, Error> {
     Ok(n)
 }
 
-const fn normalize(byte: u8) -> Result<u8, Error> {
-    let mapped = NORMAL_MAPPING[byte as usize];
+const fn map_byte(byte: u8) -> Result<u8, Error> {
+    let mapped = DECODE_MAP[byte as usize];
     if mapped == -1 || mapped == -2 {
         return Err(Error::InvalidDigit(byte));
     }
