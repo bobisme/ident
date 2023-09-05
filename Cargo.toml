@@ -3,10 +3,19 @@ name = "ident"
 version = "2.0.0"
 edition = "2021"
 
+[features]
+"default" = []
+"serde" = ["dep:serde"]
+
 [dependencies]
 fastrand = "2.0"
 thiserror = "1.0"
 konst = { version = "0.3.6", features = ["cmp"] }
+serde = { optional = true, version = "1.0.188", features = [] }
 
 [dev-dependencies]
+assert2 = "0.3.11"
+postcard = { version = "1.0.7", default_features = false, features = [] }
+serde = { version = "1.0.188", features = ["derive"] }
 proptest = "1.2.0"
+serde_json = "1.0.105"

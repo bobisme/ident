@@ -4,4 +4,4 @@ verify:
   cargo kani
 
 test:
-  cargo test
+  cargo test --all-features

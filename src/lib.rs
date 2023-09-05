@@ -8,6 +8,9 @@
 //! 36-bits for time component with an epoch of 2020-01-01
 //! should last until 2088-01-14T22:14:07
 
+#[cfg(feature = "serde")]
+pub mod serde;
+
 use std::{
     fmt::Display,
     str::FromStr,
