@@ -3,20 +3,29 @@
     clippy::nursery,
     clippy::missing_inline_in_public_items
 )]
+//! 100-bit ID stored in a u128.
+//! 64-bits of randomness every 31.25 milliseconds.
+//! 36-bits for time component with an epoch of 2020-01-01
+//! should last until 2088-01-14T22:14:07
 
 use std::{
     fmt::Display,
     str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const STR_LEN: usize = 13;
-const RND_BITS: usize = 36;
-const RND_MASK: u64 = (1 << RND_BITS) - 1;
+const STR_LEN: usize = 22;
+const SEP_IDX: [usize; 2] = [6, 15];
+const RND_BITS: usize = 64;
+const RND_MASK: u128 = (1 << RND_BITS) - 1;
+const ID_BITS: usize = 100;
+const ID_MASK: u128 = (1 << ID_BITS) - 1;
 /// Seconds since Unix epoch for 2020-01-01T00:00:00Z.
-const SECOND_EPOCH_MS: u64 = 1_577_836_800_000;
+const SECOND_EPOCH: u128 = 1_577_836_800;
+const TIME_SHIFT: usize = 5;
 
-const CHARS: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
+const CHARS_STR: &str = "0123456789abcdefghjkmnpqrstvwxyz";
+const CHARS: &[u8] = CHARS_STR.as_bytes();
 
 const NORMAL_MAPPING: [i8; 256] = [
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -46,7 +55,11 @@ pub enum Error {
 
 /// Id is a STR_LEN-char representation of a 64-bit number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Id(u64);
+pub struct Id(u128);
+
+const fn timestamp_from_unix_dur(dur: Duration) -> u128 {
+    ((dur.as_millis() - (SECOND_EPOCH * 1_000)) << TIME_SHIFT) / 1_000
+}
 
 impl Id {
     /// Creates a new [`Id`].
@@ -58,20 +71,17 @@ impl Id {
     #[inline]
     pub fn new() -> Self {
         #[allow(clippy::cast_possible_truncation)]
-        let time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-            - SECOND_EPOCH_MS;
-        let rnd = fastrand::u64(..);
+        let unix_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let time = timestamp_from_unix_dur(unix_time);
+        let rnd = fastrand::u128(..);
         let x = (time << RND_BITS) | (rnd & RND_MASK);
         Self(x)
     }
 
     #[must_use]
     #[inline]
-    pub const fn from_u64(x: u64) -> Self {
-        Self(x)
+    pub const fn from_u128(x: u128) -> Self {
+        Self(x & ((1 << ID_BITS) - 1))
     }
 }
 
@@ -100,46 +110,57 @@ impl Display for Id {
     }
 }
 
-impl From<u64> for Id {
+impl From<u128> for Id {
     #[inline]
-    fn from(x: u64) -> Self {
+    fn from(x: u128) -> Self {
         Self(x)
     }
 }
 
-const START_PLACE: u64 = 0x20u64.pow(12);
+#[allow(clippy::cast_possible_truncation)]
+const MOST_SIGNIFICANT_POSITION: u128 = 32 << (5 * (STR_LEN - SEP_IDX.len() - 2));
 
-const fn decode(input: &[u8]) -> Result<u64, Error> {
+const fn decode(input: &[u8]) -> Result<u128, Error> {
     let mut input = input;
-    if input.len() != 13 {
+    if input.len() != STR_LEN {
         return Err(Error::InvalidStrLen(input.len()));
     }
-    let mut place = START_PLACE;
-    let mut n = 0;
+    let mut place = MOST_SIGNIFICANT_POSITION;
+    let mut n: u128 = 0;
+    // NOTE: no `for` loops in const.
+    // I checked out the assembly for `while` vs `for` and it's
+    // exactly the same. --bob
     while let [byte, rest @ ..] = input {
+        input = rest;
+        if *byte == b'-' {
+            continue;
+        }
         let digit = match normalize(*byte) {
             Ok(digit) => digit,
-            err @ Err(_) => return err,
+            Err(e) => return Err(e),
         };
-        n += digit.wrapping_mul(place);
+        n += place.wrapping_mul(digit as u128);
         place >>= 5;
-        input = rest;
     }
     Ok(n)
 }
 
-const fn normalize(byte: u8) -> Result<u64, Error> {
+const fn normalize(byte: u8) -> Result<u8, Error> {
     let mapped = NORMAL_MAPPING[byte as usize];
     if mapped == -1 || mapped == -2 {
         return Err(Error::InvalidDigit(byte));
     }
     #[allow(clippy::cast_sign_loss)]
-    Ok(mapped as u64)
+    Ok(mapped as u8)
 }
 
-const fn encode_array(n: u64) -> [u8; STR_LEN] {
-    let mut n = n;
-    let mut buf = [0u8; STR_LEN];
+const fn to_100bit(n: u128) -> u128 {
+    n & ID_MASK
+}
+
+const fn encode_array(n: u128) -> [u8; STR_LEN] {
+    let mut n = to_100bit(n);
+    let mut buf = *b"000000-00000000-000000";
 
     if n == 0 {
         return buf;
@@ -147,14 +168,12 @@ const fn encode_array(n: u64) -> [u8; STR_LEN] {
 
     let mut idx = 0;
 
-    buf[idx] = CHARS[(n >> 60) as usize];
-    idx += 1;
-    n <<= 4;
-
     while idx < STR_LEN {
-        buf[idx] = CHARS[(n >> 59) as usize];
+        if !(idx == SEP_IDX[0] || idx == SEP_IDX[1]) {
+            buf[idx] = CHARS[((n >> (ID_BITS - 5)) & 0b11111) as usize];
+            n <<= 5;
+        }
         idx += 1;
-        n <<= 5;
     }
 
     buf
@@ -165,17 +184,24 @@ pub trait Identifiable {
 }
 
 // Compile-time tests.
-#[allow(non_upper_case_globals)]
 const _: () = {
     use konst::{const_eq_for, result};
+    assert!(
+        to_100bit(0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF) == 0xF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF
+    );
     // encoding
-    assert!(const_eq_for!(slice; encode_array(0b1111 << 60), *b"f000000000000"));
-    assert!(const_eq_for!(slice; encode_array(0b1111), *b"000000000000f"));
-    assert!(const_eq_for!(slice; encode_array(0xFFFF_FFFF_FFFF_FFFF), *b"fzzzzzzzzzzzz"));
-    // decoding
-    assert!(result::unwrap_or!(decode(b"f000000000000"), 0) == 0b1111 << 60);
-    assert!(result::unwrap_or!(decode(b"000000000000f"), 0) == 0b1111);
-    assert!(result::unwrap_or!(decode(b"fzzzzzzzzzzzz"), 0) == 0xFFFF_FFFF_FFFF_FFFF);
+    assert!(const_eq_for!(slice; encode_array(0b1111 << 60), *b"000000-0f000000-000000"));
+    assert!(const_eq_for!(slice; encode_array(0b1111), *b"000000-00000000-00000f"));
+    assert!(const_eq_for!(slice; encode_array(0xFFFF_FFFF_FFFF_FFFF), *b"000000-0fzzzzzz-zzzzzz"));
+    assert!(const_eq_for!(slice; encode_array((1 << 100) - 1), *b"zzzzzz-zzzzzzzz-zzzzzz"));
+    assert!(const_eq_for!(slice; encode_array(1 << 100), *b"000000-00000000-000000"));
+
+    // // decoding
+    assert!(result::unwrap_or!(decode(b"000000-0f000000-000000"), 0) == 0b1111 << 60);
+    assert!(result::unwrap_or!(decode(b"000000-00000000-00000f"), 0) == 0b1111);
+    assert!(result::unwrap_or!(decode(b"000000-0fzzzzzz-zzzzzz"), 0) == 0xFFFF_FFFF_FFFF_FFFF);
+    assert!(result::unwrap_or!(decode(b"z00000-00000000-000000"), 0) == 0b11111 << 95);
+    assert!(result::unwrap_or!(decode(b"zzzzzz-zzzzzzzz-zzzzzz"), 0) == (1 << 100) - 1);
 };
 
 #[cfg(test)]
@@ -183,38 +209,26 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_to_string() {
-        let id = Id(0b1111 << 60);
-        let s = id.to_string();
-        let mut expected = [CHARS[0]; 13];
-        expected[0] = CHARS[15];
-        assert_eq!(s, std::str::from_utf8(&expected).unwrap());
-
-        let id = Id(0b1111);
-        let s = id.to_string();
-        let mut expected = [CHARS[0]; 13];
-        expected[12] = CHARS[15];
-        assert_eq!(s, std::str::from_utf8(&expected).unwrap());
-    }
-
-    #[test]
     fn test_from_str() {
-        let id = Id::from_str("f000000000000").unwrap();
+        let id = Id::from_str("000000-0f000000-000000").unwrap();
         assert_eq!(id.0, 0b01111 << 60);
-        let id = Id::from_str("f00000000000f").unwrap();
+        let id = Id::from_str("000000-0f000000-00000f").unwrap();
         assert_eq!(id.0, 0b01111 << 60 | 0b01111);
-        let id = Id::from_str("000000000000f").unwrap();
+        let id = Id::from_str("000000-00000000-00000f").unwrap();
         assert_eq!(id.0, 0b01111);
-        let id = Id::from_str("fzzzzzzzzzzzz").unwrap();
+        let id = Id::from_str("000000-0fzzzzzz-zzzzzz").unwrap();
         assert_eq!(id.0, 0xFFFF_FFFF_FFFF_FFFF);
     }
 
     #[test]
     fn is_ok() {
         let id = Id::from(0xdead_beef_beef_dead);
-        assert_eq!("dxbdyxyzezqnd", id.to_string());
+        assert_eq!("000000-0dxbdyxy-zezqnd", id.to_string());
+        assert_eq!(encode_array(1 << 100), *b"000000-00000000-000000");
+        // let id = Id::from(0x10000000000000000000000000);
+        // assert_eq!(id.to_string(), "ass");
 
-        let id = Id::from_str("dxbdyxyzezqnd").unwrap();
+        let id = Id::from_str("000000-0dxbdyxy-zezqnd").unwrap();
         assert_eq!(id.0, 0xdead_beef_beef_dead);
 
         let id = Id::new();
@@ -222,13 +236,37 @@ mod test {
         assert_eq!(s, Id::from_str(&s).unwrap().to_string());
         assert_eq!(id, Id::from_str(&s).unwrap());
     }
+
+    const PATTERN: &str = konst::string::str_concat!(&[
+        "[", CHARS_STR, "]{6}-[", CHARS_STR, "]{8}-[", CHARS_STR, "]{6}"
+    ]);
+
+    proptest::proptest! {
+        #[test]
+        fn doesnt_crash(s in "\\PC*") {
+            let _ = Id::from_str(&s);
+        }
+
+        #[test]
+        fn parses_valid_ids(s in PATTERN) {
+            Id::from_str(&s).unwrap();
+        }
+
+        #[test]
+        fn encodes_u128s(x in 0u128..) {
+            let encoded_id = Id::from_u128(x);
+            let decoded_id = Id::from_str(&encoded_id.to_string()).unwrap();
+            assert!(encoded_id.0 == decoded_id.0);
+        }
+    }
 }
 
 #[cfg(kani)]
 #[kani::proof]
 fn check_encoding() {
     use kani;
-    let x: u64 = kani::any();
+    let x: u128 = kani::any();
     let arr = encode_array(x);
-    assert!(decode(&arr).unwrap() == x);
+    let decoded = decode(&arr).unwrap();
+    assert!(decoded == (x & ((1 << ID_BITS) - 1)));
 }
